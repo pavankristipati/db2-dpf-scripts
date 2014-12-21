@@ -1,0 +1,204 @@
+#!/bin/bash
+
+## Author: Pavan Kristipati
+## Date: 08/29/2014
+
+## Purpose: This script makes DBA life easy when creating multiple tables that need to be hashed
+## Problem: In many cases, the modeler will not include the hash keys and the tablespace clauses forcing DBA to spend time to come up with hash keys
+## In many cases, hash keys are primary keys due to high cardinality column(s)
+
+## How to use this script?
+## First go ahead and create tables that modelers give and then use this script to convert those tables into hash tables
+
+
+## Uasge: hash_table $SCHEMA $TABLE
+
+## If you have many tables, just use the script below:
+## hash_table_list $ddlfile ($ddlfile is the ddlfile that modelers gave originally)
+
+##schema=`echo $line | awk '{print $1}'`
+##table=`echo $line | awk '{print $2}'`
+
+schema=$1
+table=$2
+
+SCHEMA=`echo $schema | tr '[:lower:]' '[:upper:]'`
+TABLE=`echo $table | tr '[:lower:]' '[:upper:]'`
+
+##echo $SCHEMA
+##echo $TABLE
+
+envi=dv
+logfile=$SCHEMA.$TABLE.hash.log
+tbsp_list=$SCHEMA.$TABLE.tablespaces
+
+critical=$(
+  tput setaf 1
+  tput setab 7
+  tput bold
+  tput blink
+  tput smso
+)
+normal=$(
+  tput sgr0
+)
+
+cp /db2home/db2inst1/dba/custom/data/hash.replace.MASTER.sed .
+
+parameterfile=hash.replace.MASTER.sed
+
+DBNAME=`db2 list database directory show detail | grep -B6 -i indirect | grep "Database name" | sed "s/.*= //" `
+
+db2 "connect to $DBNAME"
+
+##db2 "select colnames from syscat.indexes where tabschema = '$SCHEMA' AND TABNAME = '$TABLE' AND UNIQUERULE = 'P'"
+
+pkcolcount=$(db2 -x "select count(*) from syscat.indexes where tabschema = '$SCHEMA' AND TABNAME = '$TABLE' AND UNIQUERULE = 'P'")
+
+if [ $pkcolcount = 0 ]
+ then	
+         echo "${critical} The table $SCHEMA.$TABLE does not have a primary key (to be used as a hash key). You would have to pick one before proceeding... ${normal}"         
+	 db2 -v "describe table $SCHEMA.$TABLE"
+	 echo "Enter the hash keys for $SCHEMA.$TABLE separated by commas (in case of multiple columns) Example: COL1, COL2"
+	 read hashkey < /dev/tty
+
+ else
+
+       	pkcol=$(db2 -x "select colnames from syscat.indexes where tabschema = '$SCHEMA' AND TABNAME = '$TABLE' AND UNIQUERULE = 'P'")
+	 hashkey=$(echo $pkcol | sed 's/\B+//g' | sed 's/+/,/g')
+ fi
+
+##pkcol=$(db2 -x "select colnames from syscat.indexes where tabschema = '$SCHEMA' AND TABNAME = '$TABLE' AND UNIQUERULE = 'P'")
+## The above pkcol value will have '+' b/n colnames and at the beginning of the string. \B in sed removes + at the boundaries
+##hashkey=$(echo $pkcol | sed 's/\B+//g' | sed 's/+/,/g')
+
+uniquename=$(date +%Y%m%d%H%M%S)
+
+##epoch=$(date +%s)
+##echo $epoch
+
+tablespace=$envi$uniquename
+##echo $tablespace
+
+ix=ix
+ixspace=$envi$uniquename$ix
+
+##echo $ixspace
+
+mkdir -p $SCHEMA.$TABLE
+
+cd $SCHEMA.$TABLE
+
+echo "Generating ddl for table $SCHEMA.$TABLE"
+ddl $SCHEMA $TABLE > /dev/null 2>&1
+
+sed -f ../$parameterfile < $SCHEMA.$TABLE.existing.ddl > $SCHEMA.$TABLE.step1.ddl
+sed -i '/DISTRIBUTE BY HASH/d' $SCHEMA.$TABLE.step1.ddl
+
+tbspname=$(db2 -x "select char(tbspace,20) from syscat.tables where tabschema = '$SCHEMA' and tabname = '$TABLE' with ur")
+tbspname=$(echo $tbspname | sed 's/[ \t]*$//')
+
+##create_tablespace -t $tablespace -e dv > create_tablespace.$tablespace.ddl.log
+##create_tablespace -t $ixspace -e dv > create_tablespace.$ixspace.ddl.log
+
+##db2 -x "select char(bpname,10) from syscat.bufferpools bps, syscat.tablespaces tbs where tbspace = 'DV1409253569' and tbs.bufferpoolid = bps.bufferpoolid"
+
+bpname=$(db2 -x "select bpname from syscat.bufferpools where bufferpoolid = (select bufferpoolid from syscat.tablespaces where tbspace= (select tbspace from syscat.tables where tabschema = '$SCHEMA' and tabname = '$TABLE'))")
+
+echo $bpname
+
+echo "$tablespace PDPG_DV $bpname" > $tbsp_list
+echo "$ixspace PDPG_DV $bpname" >> $tbsp_list
+
+# Generate DDL for tablespaces
+
+generate_tbspc_ddl.sh -l $tbsp_list -e dv
+
+## The above script generates the output to create_tbspc_${tbsp_list}.ddl
+############################################################################## This is where I stopped #####################################33
+
+## sed -e '/DISTRIBUTE BY HASH/s/^/--/g' $SCHEMA.$TABLE.step1.ddl > $SCHEMA.$TABLE.step2.ddl
+
+sed -i "s/IN.*${tbspname}.*;/DISTRIBUTE BY HASH ($hashkey) IN $tablespace INDEX IN $ixspace;/g" $SCHEMA.$TABLE.step1.ddl
+
+## cp $SCHEMA.$TABLE.step1.ddl $SCHEMA.$TABLE.hash.ddl
+##cat $tablespace.ddl $ixspace.ddl $SCHEMA.$TABLE.step1.ddl > $SCHEMA.$TABLE.hash.ddl
+
+## Combining both tablespace ddl and table ddl
+
+cat create_tbspc_${tbsp_list}.ddl $SCHEMA.$TABLE.step1.ddl > $SCHEMA.$TABLE.step2.ddl
+
+cp $SCHEMA.$TABLE.step2.ddl $SCHEMA.$TABLE.hash.ddl
+
+touch $SCHEMA.$TABLE.drop.ddl
+
+tabcount=$(db2 -x "select count(*) from syscat.tables where type='T' and tabschema='$SCHEMA' AND TABNAME='$TABLE' WITH UR")
+
+if [ $tabcount = 1 ]
+then
+
+echo "${critical}Table $SCHEMA.$TABLE already exists on $DBNAME .. ${normal}"
+
+        echo " Before $SCHEMA.$TABLE.hash.ddl can be run, $SCHEMA.$TABLE needs to be dropped.."
+        echo "${critical} Do you want to drop and re-create this table? Yes/No ${normal}"
+        read choicek < /dev/tty
+                case $choicek in
+                         [yY] | [yY][Ee][Ss] )  echo "******************************************************************"
+                                                echo "${critical}Table $SCHEMA.$TABLE will be dropped just before creating the hash version${normal}"
+                                                echo "drop table $SCHEMA.$TABLE;" > $SCHEMA.$TABLE.drop.ddl
+                                                echo "" >> $SCHEMA.$TABLE.drop.ddl
+                                                echo "******************************************************************"
+                                                 ;;
+
+                         [nN] | [nN][oO] )      echo "******************************************************************"
+                                                echo "${critical}You choose not to drop and re-create the table..Exiting${normal}"
+                                                ##continue
+                                                exit
+                                                echo "******************************************************************"
+                                                ;;
+                        *) echo "Invalid input"
+                                                echo "${critical}Invalid Input.{normal}"
+                                                echo "${critical}You choose not to drop and re-create the table..No changes done. Exiting..${n
+ormal}"
+                                                exit
+                                                ## continue
+                            ;;
+                        esac
+
+else
+echo ""
+fi
+
+cat $SCHEMA.$TABLE.drop.ddl $SCHEMA.$TABLE.step2.ddl > $SCHEMA.$TABLE.hash.ddl
+
+echo "Running ddl $SCHEMA.$TABLE.hash.ddl for $SCHEMA.$TABLE" 
+
+db2 +c -tvf $SCHEMA.$TABLE.hash.ddl | tee -a $logfile
+
+  echo "${critical}Do you want to Commit these changes?${normal}"
+                read optionk < /dev/tty
+                case $optionk in
+                         [yY] | [yY][Ee][Ss] )  echo "******************************************************************"
+                                                echo "${critical}Committing changes${normal}"
+                                                db2 -v commit
+                                                echo "******************************************************************"
+                                                 ;;
+
+                         [nN] | [nN][oO] )      echo "******************************************************************"
+                                                echo "${critical}Rolling back changes${normal}"
+                                                db2 -v "rollback"
+                                               ## echo "${critical}Dropping tablespaces that have been created${normal}"
+                                               ## db2 -v "drop tablespace $tablespace"
+                                               ## db2 -v "drop tablespace $ixspace"
+                                                echo "******************************************************************"
+                                                ;;
+                        *) echo "Invalid input"
+                                                echo "${critical}Invalid Input.{normal}"
+                                                echo "${critical}Rolling back changes${normal}"
+                                                db2 -v "rollback"
+                            ;;
+                        esac
+
+rm -rf $SCHEMA.$TABLE.step1.ddl
+touch $SCHEMA.$TABLE.hash.ddl
+touch $logfile
