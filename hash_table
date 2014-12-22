@@ -98,9 +98,6 @@ sed -i '/DISTRIBUTE BY HASH/d' $SCHEMA.$TABLE.step1.ddl
 tbspname=$(db2 -x "select char(tbspace,20) from syscat.tables where tabschema = '$SCHEMA' and tabname = '$TABLE' with ur")
 tbspname=$(echo $tbspname | sed 's/[ \t]*$//')
 
-##create_tablespace -t $tablespace -e dv > create_tablespace.$tablespace.ddl.log
-##create_tablespace -t $ixspace -e dv > create_tablespace.$ixspace.ddl.log
-
 ##db2 -x "select char(bpname,10) from syscat.bufferpools bps, syscat.tablespaces tbs where tbspace = 'DV1409253569' and tbs.bufferpoolid = bps.bufferpoolid"
 
 bpname=$(db2 -x "select bpname from syscat.bufferpools where bufferpoolid = (select bufferpoolid from syscat.tablespaces where tbspace= (select tbspace from syscat.tables where tabschema = '$SCHEMA' and tabname = '$TABLE'))")
@@ -115,9 +112,6 @@ echo "$ixspace PDPG_DV $bpname" >> $tbsp_list
 generate_tbspc_ddl.sh -l $tbsp_list -e dv
 
 ## The above script generates the output to create_tbspc_${tbsp_list}.ddl
-############################################################################## This is where I stopped #####################################33
-
-## sed -e '/DISTRIBUTE BY HASH/s/^/--/g' $SCHEMA.$TABLE.step1.ddl > $SCHEMA.$TABLE.step2.ddl
 
 sed -i "s/IN.*${tbspname}.*;/DISTRIBUTE BY HASH ($hashkey) IN $tablespace INDEX IN $ixspace;/g" $SCHEMA.$TABLE.step1.ddl
 
